@@ -54,6 +54,7 @@ import { ChatStorageService } from '../../services/chatStorageService';
 import { ChatHistoryService } from '../../services/chatHistoryService';
 import type { Model as A4FModel } from "../../services/a4fApi";
 import { GlowEffect } from '@/components/ui/glow-effect';
+import { uploadImageToSupabase } from '../../services/supabaseStorageService';
 
 interface UseAutoResizeTextareaProps {
     minHeight: number;
@@ -595,9 +596,27 @@ export function AnimatedAIChat() {
 
             if (response.data && response.data.length > 0) {
                 const imageUrl = response.data[0].url;
-                return `I've generated an image for you based on your prompt: "${prompt.replace('/image ', '')}"
+                // Download the image as a blob
+                const imageResponse = await fetch(imageUrl);
+                if (!imageResponse.ok) {
+                    throw new Error('Failed to download generated image.');
+                }
+                const imageBlob = await imageResponse.blob();
 
-![Generated Image](${imageUrl})`;
+                // Get user and session info for upload
+                const { data: { user } } = await (await import("@/lib/supabase")).supabase.auth.getUser();
+                if (!user) {
+                    throw new Error('User not authenticated for image upload.');
+                }
+                let sessionId = currentSessionId;
+                if (!sessionId) {
+                    sessionId = await createNewSession();
+                }
+                // Upload to Supabase storage
+                const supabaseImageUrl = await uploadImageToSupabase(imageBlob, user.id, sessionId);
+
+                return `I've generated an image for you based on your prompt: "${prompt.replace('/image ', '')}"
+\n![Generated Image](${supabaseImageUrl})`;
             } else {
                 return 'Sorry, no image was generated. Please try again.';
             }
