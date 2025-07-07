@@ -43,7 +43,7 @@ import { formatDistanceToNow } from 'date-fns';
 import { FileUpload } from './file-upload';
 import { ModelSelector } from './model-selector';
 import type { Model, ImageModel } from './model-selector';
-import { IMAGE_MODELS } from './model-selector';
+import { IMAGE_MODELS, MODELS } from './model-selector';
 import { ImageApiService } from '../../services/imageApi';
 import { RAGApiService } from '../../services/ragApi';
 import { VideoApiService } from '../../services/videoApi';
@@ -52,6 +52,8 @@ import { AnimatedGlowingBorder } from "./animated-glowing-border";
 import GradientButton from "@/components/ui/button-1";
 import { ChatStorageService } from '../../services/chatStorageService';
 import { ChatHistoryService } from '../../services/chatHistoryService';
+import type { Model as A4FModel } from "../../services/a4fApi";
+import { GlowEffect } from '@/components/ui/glow-effect';
 
 interface UseAutoResizeTextareaProps {
     minHeight: number;
@@ -304,6 +306,23 @@ const MarkdownComponents = {
       {children}
     </a>
   ),
+  img: ({ src, alt }: any) => (
+    <div className="relative inline-block align-middle w-full max-w-md my-4">
+      <GlowEffect
+        className="z-0 rounded-lg"
+        mode="rotate"
+        blur="medium"
+        scale={1.08}
+        colors={["#0894FF", "#C959DD", "#FF2E54", "#FF9004"]}
+      />
+      <img
+        src={src}
+        alt={alt}
+        className="relative z-10 w-full rounded-lg shadow-lg border border-white/10"
+        style={{ display: 'block' }}
+      />
+    </div>
+  ),
 };
 
 export function AnimatedAIChat() {
@@ -506,18 +525,42 @@ export function AnimatedAIChat() {
         return newSessionId;
     };
 
-    const updateSessionTitle = (sessionId: string, firstMessage: string) => {
+    const updateSessionTitle = async (sessionId: string, firstMessage: string) => {
+        const newTitle = firstMessage.slice(0, 50) + (firstMessage.length > 50 ? '...' : '');
+        
+        // Update local state immediately for UI responsiveness
         setChatSessions(prev => prev.map(session => 
             session.id === sessionId 
-                ? { ...session, title: firstMessage.slice(0, 50) + (firstMessage.length > 50 ? '...' : '') }
+                ? { ...session, title: newTitle }
                 : session
         ));
+        
+        // Update title in Supabase
+        if (isAuthenticated) {
+            try {
+                await ChatStorageService.updateChatTitle(sessionId, newTitle);
+                console.log('Session title updated in Supabase:', sessionId, newTitle);
+            } catch (error) {
+                console.error('Failed to update session title in Supabase:', error);
+            }
+        }
     };
 
-    const deleteSession = (sessionId: string) => {
+    const deleteSession = async (sessionId: string) => {
+        // Remove from local state immediately for UI responsiveness
         setChatSessions(prev => prev.filter(session => session.id !== sessionId));
         if (currentSessionId === sessionId) {
             setCurrentSessionId(null);
+        }
+        
+        // Delete from Supabase
+        if (isAuthenticated) {
+            try {
+                await ChatStorageService.deleteChatSession(sessionId);
+                console.log('Session deleted from Supabase:', sessionId);
+            } catch (error) {
+                console.error('Failed to delete session from Supabase:', error);
+            }
         }
     };
 
@@ -628,7 +671,7 @@ export function AnimatedAIChat() {
 
         // Update title if this is the first message
         if (!currentSession || currentSession.messages.length === 0) {
-            updateSessionTitle(sessionId, userMessage.content);
+            await updateSessionTitle(sessionId, userMessage.content);
         }
 
         setValue("");
@@ -646,6 +689,9 @@ export function AnimatedAIChat() {
                 timestamp: Date.now(),
                 model: "knowledge-base",
             };
+
+            // Save to Supabase
+            await saveSessionToSupabase(sessionId, [...currentSession?.messages || [], userMessage, assistantMessage]);
 
             setChatSessions(prev => prev.map(session => 
                 session.id === sessionId 
@@ -669,6 +715,10 @@ export function AnimatedAIChat() {
                 timestamp: Date.now(),
                 model: "knowledge-base",
             };
+            
+            // Save to Supabase
+            await saveSessionToSupabase(sessionId, [...currentSession?.messages || [], userMessage, errorMessage]);
+            
             setChatSessions(prev => prev.map(session => 
                 session.id === sessionId 
                     ? { 
@@ -721,10 +771,25 @@ export function AnimatedAIChat() {
         }
     };
 
+    // Helper function to save session to Supabase
+    const saveSessionToSupabase = async (sessionId: string, messages: ChatMessage[]) => {
+        if (isAuthenticated) {
+            try {
+                const currentSession = chatSessions.find(s => s.id === sessionId);
+                const title = currentSession?.title || "New Chat";
+                await ChatStorageService.saveChatSession(sessionId, messages, title);
+                console.log('Session saved to Supabase:', sessionId);
+            } catch (error) {
+                console.error('Failed to save session to Supabase:', error);
+            }
+        }
+    };
+
     const handleSendMessage = async () => {
         if (!value.trim() || isTyping) return;
 
         const messageContent = value.trim();
+        let assistantContent = ""; // Declare at function level
 
         // Check if it's a RAG query
         if (messageContent.startsWith('/rag ') || isRAGMode) {
@@ -762,7 +827,7 @@ export function AnimatedAIChat() {
 
         // Update title if this is the first message
         if (!currentSession || currentSession.messages.length === 0) {
-            updateSessionTitle(sessionId, userMessage.content);
+            await updateSessionTitle(sessionId, userMessage.content);
         }
 
         setValue("");
@@ -772,8 +837,6 @@ export function AnimatedAIChat() {
         setCurrentAssistantMessage("");
 
         try {
-            let assistantContent = "";
-
             // Check if it's an image generation command
             if (messageContent.startsWith('/image ')) {
                 try {
@@ -869,6 +932,22 @@ export function AnimatedAIChat() {
                         { role: 'user', content: messageContent }
                     ];
 
+                    // Ensure selectedModel is a chat model, not an image model
+                    const validA4FModels: A4FModel[] = [
+                        'provider-1/chatgpt-4o-latest',
+                        'provider-5/gpt-4o',
+                        'provider-5/gpt-4o-mini',
+                        'provider-5/o1-preview',
+                        'provider-5/o1-mini',
+                        'provider-2/claude-3-5-sonnet-20241022',
+                        'provider-2/claude-3-5-haiku-20241022',
+                        'provider-3/llama-3.1-405b-instruct',
+                        'provider-3/llama-3.1-70b-instruct',
+                        'provider-4/gemini-1.5-pro-002',
+                        'provider-4/gemini-1.5-flash-002'
+                    ];
+                    const chatModel: A4FModel = validA4FModels.includes(selectedModel as A4FModel) ? selectedModel as A4FModel : 'provider-5/gpt-4o';
+
                     await A4FApiService.streamResponse(
                         apiMessages,
                         (chunk: string) => {
@@ -921,7 +1000,7 @@ export function AnimatedAIChat() {
                             setCurrentAssistantMessage("");
                             setIsTyping(false);
                         },
-                        selectedModel as Model
+                        chatModel
                     );
                     return;
                 }
@@ -951,20 +1030,6 @@ export function AnimatedAIChat() {
                 : session
         ));
         setIsTyping(false);
-    };
-
-    // Helper function to save session to Supabase
-    const saveSessionToSupabase = async (sessionId: string, messages: ChatMessage[]) => {
-        if (isAuthenticated) {
-            try {
-                const currentSession = chatSessions.find(s => s.id === sessionId);
-                const title = currentSession?.title || "New Chat";
-                await ChatStorageService.saveChatSession(sessionId, messages, title);
-                console.log('Session saved to Supabase:', sessionId);
-            } catch (error) {
-                console.error('Failed to save session to Supabase:', error);
-            }
-        }
     };
 
     const selectCommandSuggestion = (index: number) => {
