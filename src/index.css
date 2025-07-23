@@ -74,6 +74,34 @@ body::-webkit-scrollbar {
   height: 0 !important;
 }
 
+/* Custom Scrollbar for Sidebar and Chat Window */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #444 #18181b;
+  transition: scrollbar-color 0.2s;
+}
+.custom-scrollbar:hover {
+  scrollbar-color: #666 #18181b;
+}
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  background: #18181b;
+  transition: background 0.2s;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 8px;
+  min-height: 40px;
+  transition: background 0.2s;
+}
+.custom-scrollbar:hover::-webkit-scrollbar-thumb {
+  background: #666;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #18181b;
+  border-radius: 8px;
+}
+
 @layer base {
   :root {
     --background: 0 0% 100%;

@@ -55,6 +55,17 @@ import { ChatHistoryService } from '../../services/chatHistoryService';
 import type { Model as A4FModel } from "../../services/a4fApi";
 import { GlowEffect } from '@/components/ui/glow-effect';
 import { uploadImageToSupabase } from '../../services/supabaseStorageService';
+import AILoader from './ailoader';
+import CodeBlock from './CodeBlock';
+// If DOMPurify import fails, add a comment for the developer to install it
+let DOMPurify: any = undefined;
+try {
+  // @ts-ignore
+  DOMPurify = require('dompurify');
+} catch (e) {
+  // If not available, fallback to raw HTML (not recommended for production)
+  DOMPurify = { sanitize: (html: string) => html };
+}
 
 interface UseAutoResizeTextareaProps {
     minHeight: number;
@@ -212,15 +223,9 @@ const MarkdownComponents = {
   code({ node, inline, className, children, ...props }: any) {
     const match = /language-(\w+)/.exec(className || '');
     return !inline && match ? (
-      <SyntaxHighlighter
-        style={oneDark}
-        language={match[1]}
-        PreTag="div"
-        className="rounded-lg !bg-gray-900 !mt-2 !mb-2"
-        {...props}
-      >
-        {String(children).replace(/\n$/, '')}
-      </SyntaxHighlighter>
+      <CodeBlock>
+        <span>{String(children).replace(/\n$/, '')}</span>
+      </CodeBlock>
     ) : (
       <code
         className="bg-gray-800 text-gray-100 px-1.5 py-0.5 rounded text-sm font-mono"
@@ -353,6 +358,41 @@ export function AnimatedAIChat() {
     });
     const [inputFocused, setInputFocused] = useState(false);
     const commandPaletteRef = useRef<HTMLDivElement>(null);
+    const [deepResearchStep, setDeepResearchStep] = useState<null | "topic" | "email" | "submitting">(null);
+    const [deepResearchTopic, setDeepResearchTopic] = useState("");
+    const [deepResearchEmail, setDeepResearchEmail] = useState("");
+    const [showAILoader, setShowAILoader] = useState<null | 'image' | 'video'>(null);
+    const chatContainerRef = useRef<HTMLDivElement>(null);
+    const [isInputSticky, setIsInputSticky] = useState(false);
+
+    const currentSession = chatSessions.find(session => session.id === currentSessionId);
+
+    // Detect if input should be sticky (bottom) based on scroll or chat engagement
+    useEffect(() => {
+        const handleScroll = () => {
+            if (!chatContainerRef.current) return;
+            const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
+            // If not at the bottom, or enough messages to scroll, stick input to bottom
+            setIsInputSticky(scrollHeight > clientHeight + 40 && scrollTop + clientHeight < scrollHeight - 40);
+        };
+        const chatDiv = chatContainerRef.current;
+        if (chatDiv) {
+            chatDiv.addEventListener('scroll', handleScroll);
+        }
+        return () => {
+            if (chatDiv) chatDiv.removeEventListener('scroll', handleScroll);
+        };
+    }, [currentSession?.messages]);
+
+    // When new message arrives, if user is near bottom, scroll to bottom
+    useEffect(() => {
+        if (!chatContainerRef.current) return;
+        const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
+        // If user is near the bottom, auto-scroll
+        if (scrollHeight - (scrollTop + clientHeight) < 120) {
+            chatContainerRef.current.scrollTo({ top: chatContainerRef.current.scrollHeight, behavior: 'smooth' });
+        }
+    }, [currentSession?.messages, currentAssistantMessage]);
 
     const commandSuggestions: CommandSuggestion[] = [
         { 
@@ -391,9 +431,14 @@ export function AnimatedAIChat() {
             description: "Query the knowledge base", 
             prefix: "/rag" 
         },
+        {
+            icon: <Sparkles className="w-4 h-4" />,
+            label: "Deep Research",
+            description: "Research a topic and send to your email",
+            prefix: "/deepresearch"
+        },
     ];
 
-    const currentSession = chatSessions.find(session => session.id === currentSessionId);
     const showChat = currentSession && currentSession.messages.length > 0;
 
     const filteredSessions = chatSessions.filter(session =>
@@ -500,6 +545,9 @@ export function AnimatedAIChat() {
     }, []);
 
     const createNewSession = async () => {
+        setDeepResearchStep(null);
+        setDeepResearchTopic("");
+        setDeepResearchEmail("");
         const newSessionId = Date.now().toString();
         const newSession: ChatSession = {
             id: newSessionId,
@@ -586,6 +634,7 @@ export function AnimatedAIChat() {
     };
 
     const handleImageGeneration = async (prompt: string): Promise<string> => {
+        setShowAILoader('image');
         try {
             const response = await ImageApiService.generateImage({
                 model: selectedModel as ImageModel,
@@ -614,19 +663,22 @@ export function AnimatedAIChat() {
                 }
                 // Upload to Supabase storage
                 const supabaseImageUrl = await uploadImageToSupabase(imageBlob, user.id, sessionId);
-
+                setShowAILoader(null);
                 return `I've generated an image for you based on your prompt: "${prompt.replace('/image ', '')}"
 \n![Generated Image](${supabaseImageUrl})`;
             } else {
+                setShowAILoader(null);
                 return 'Sorry, no image was generated. Please try again.';
             }
         } catch (error) {
+            setShowAILoader(null);
             console.error('Image generation error:', error);
             return 'Sorry, I encountered an error while generating the image. Please try again.';
         }
     };
 
     const handleVideoGeneration = async (prompt: string): Promise<string> => {
+        setShowAILoader('video');
         try {
             const cleanPrompt = prompt.replace('/video ', '');
             // Call the actual video generation API
@@ -637,22 +689,43 @@ export function AnimatedAIChat() {
                 quality: '720p',
                 duration: 8
             });
-
             if (response.data && response.data.length > 0) {
-                const videoUrls = response.data.map(video => video.url);
-                // Store video generation in chat history
-                const { storeVideoGeneration, getRagSessionId } = useChatStore.getState();
-                const sessionId = getRagSessionId();
-                await storeVideoGeneration(cleanPrompt, videoUrls, 'provider-6/wan-2.1', sessionId);
-                // Create video HTML for each generated video
-                const videoElements = videoUrls.map(url => 
-                    `<video controls style="max-width: 100%; height: auto; margin: 10px 0;">\n  <source src="${url}" type="video/mp4">\n  Your browser does not support the video tag.\n</video>`
-                ).join('\n\n');
-                return `I've generated ${videoUrls.length} video${videoUrls.length > 1 ? 's' : ''} for you based on your prompt: "${cleanPrompt}"\n\n${videoElements}`;
+                const videoUrl = response.data[0].url;
+                // Download the video as a blob
+                const videoResponse = await fetch(videoUrl);
+                if (!videoResponse.ok) {
+                    throw new Error('Failed to download generated video.');
+                }
+                let videoBlob = await videoResponse.blob();
+                console.log('Fetched video blob:', videoBlob.type, videoBlob.size);
+                // If the blob type is not video/mp4, force it
+                if (videoBlob.type !== 'video/mp4') {
+                    const arrayBuffer = await videoBlob.arrayBuffer();
+                    videoBlob = new Blob([arrayBuffer], { type: 'video/mp4' });
+                    console.log('Fixed video blob type to video/mp4:', videoBlob.type, videoBlob.size);
+                }
+                // Get user and session info for upload
+                const { data: { user } } = await (await import("@/lib/supabase")).supabase.auth.getUser();
+                if (!user) {
+                    throw new Error('User not authenticated for video upload.');
+                }
+                let sessionId = currentSessionId;
+                if (!sessionId) {
+                    sessionId = await createNewSession();
+                }
+                // Upload to Supabase storage
+                const { uploadVideoToSupabase } = await import('../../services/supabaseStorageService');
+                const supabaseVideoUrl = await uploadVideoToSupabase(videoBlob, user.id, sessionId);
+                console.log('Supabase video URL:', supabaseVideoUrl);
+                setShowAILoader(null);
+                return `I've generated a video for you based on your prompt: "${cleanPrompt}"
+<video controls style="max-width: 100%; height: auto; margin: 10px 0;"><source src="${supabaseVideoUrl}" type="video/mp4">Your browser does not support the video tag.</video>`;
             } else {
+                setShowAILoader(null);
                 return 'Sorry, no video was generated. Please try again.';
             }
         } catch (error) {
+            setShowAILoader(null);
             console.error('Video generation error:', error);
             let message = 'Sorry, I encountered an error while generating the video. Please try again.';
             if (error instanceof Error) {
@@ -806,9 +879,8 @@ export function AnimatedAIChat() {
 
     const handleSendMessage = async () => {
         if (!value.trim() || isTyping) return;
-
         const messageContent = value.trim();
-        let assistantContent = ""; // Declare at function level
+        let assistantContent = "";
 
         // Check if it's a RAG query
         if (messageContent.startsWith('/rag ') || isRAGMode) {
@@ -951,21 +1023,8 @@ export function AnimatedAIChat() {
                         { role: 'user', content: messageContent }
                     ];
 
-                    // Ensure selectedModel is a chat model, not an image model
-                    const validA4FModels: A4FModel[] = [
-                        'provider-1/chatgpt-4o-latest',
-                        'provider-5/gpt-4o',
-                        'provider-5/gpt-4o-mini',
-                        'provider-5/o1-preview',
-                        'provider-5/o1-mini',
-                        'provider-2/claude-3-5-sonnet-20241022',
-                        'provider-2/claude-3-5-haiku-20241022',
-                        'provider-3/llama-3.1-405b-instruct',
-                        'provider-3/llama-3.1-70b-instruct',
-                        'provider-4/gemini-1.5-pro-002',
-                        'provider-4/gemini-1.5-flash-002'
-                    ];
-                    const chatModel: A4FModel = validA4FModels.includes(selectedModel as A4FModel) ? selectedModel as A4FModel : 'provider-5/gpt-4o';
+                    // Use the selected model directly for the API call
+                    const chatModel = selectedModel as A4FModel;
 
                     await A4FApiService.streamResponse(
                         apiMessages,
@@ -1071,6 +1130,12 @@ export function AnimatedAIChat() {
 
     return (
         <div className="min-h-screen flex w-full bg-black text-white relative overflow-hidden">
+            {/* Loader Overlay for Image/Video Generation */}
+            {showAILoader && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                    <AILoader variant="sparkle" message="Creating magic..." size="md" />
+                </div>
+            )}
             {/* Background Effects - Always Present */}
             <div className="absolute inset-0 w-full h-full overflow-hidden">
                 <div className="absolute top-0 left-1/4 w-96 h-96 bg-violet-500/10 rounded-full mix-blend-normal filter blur-[128px] animate-pulse" />
@@ -1140,7 +1205,7 @@ export function AnimatedAIChat() {
                         </div>
 
                         {/* Chat Sessions List */}
-                        <div className="flex-1 overflow-y-auto">
+                        <div className="flex-1 overflow-y-auto custom-scrollbar">
                             <div className="p-2">
                                 {filteredSessions.length > 0 ? (
                                     <div className="space-y-1">
@@ -1167,7 +1232,6 @@ export function AnimatedAIChat() {
                                             {formatDistanceToNow(session.updatedAt, { addSuffix: true })}
                                         </div>
                                     </div>
-                                    
                                     {/* Action buttons */}
                                     <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
                                         <button
@@ -1204,6 +1268,8 @@ export function AnimatedAIChat() {
 )}
             </AnimatePresence>
 
+            {/* Mobile Sidebar Toggle and Main Content as a single parent */}
+            <div className="flex-1 flex flex-col relative z-10">
             {/* Mobile Sidebar Toggle */}
             {!sidebarOpen && (
                 <button
@@ -1220,10 +1286,12 @@ export function AnimatedAIChat() {
                 <AnimatePresence>
                     {showChat && (
                         <motion.div 
+                            ref={chatContainerRef}
                             initial={{ opacity: 0, y: 20 }}
                             animate={{ opacity: 1, y: 0 }}
                             exit={{ opacity: 0, y: -20 }}
-                            className="flex-1 overflow-y-auto pt-8 pb-4 px-6"
+                            className="flex-1 overflow-y-auto pt-8 pb-4 px-6 custom-scrollbar"
+                            style={{ scrollBehavior: 'smooth' }}
                         >
                             <div className="max-w-4xl mx-auto space-y-6">
                                 {/* Messages */}
@@ -1278,6 +1346,9 @@ export function AnimatedAIChat() {
                                             )}
                                             
                                             {message.role === 'assistant' ? (
+                                                    message.content.includes('<video') ? (
+                                                        <div className="prose prose-invert max-w-none" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(message.content) }} />
+                                                    ) : (
                                                 <div className="prose prose-invert max-w-none">
                                                     <ReactMarkdown
                                                         remarkPlugins={[remarkGfm]}
@@ -1286,6 +1357,7 @@ export function AnimatedAIChat() {
                                                         {message.content}
                                                     </ReactMarkdown>
                                                 </div>
+                                                    )
                                             ) : (
                                                 <div className="whitespace-pre-wrap text-sm leading-relaxed">
                                                     {message.content}
@@ -1313,11 +1385,6 @@ export function AnimatedAIChat() {
                                                 >
                                                     {currentAssistantMessage}
                                                 </ReactMarkdown>
-                                                <motion.span 
-                                                    className="inline-block w-2 h-4 bg-white/60 ml-1"
-                                                    animate={{ opacity: [1, 0, 1] }}
-                                                    transition={{ duration: 1, repeat: Infinity }}
-                                                />
                                             </div>
                                         </div>
                                     </motion.div>
@@ -1372,12 +1439,14 @@ export function AnimatedAIChat() {
                             )}
                         </AnimatePresence>
 
-                        {/* Input Area */}
-                        <motion.div 
-                            className="relative backdrop-blur-2xl bg-white/[0.02] rounded-2xl border border-white/[0.05] shadow-2xl"
-                            animate={{
-                                scale: showChat ? 0.95 : 1,
-                            }}
+                        {/* Input Area - floating/sticky logic */}
+                        <motion.div
+                            className={cn(
+                                "relative backdrop-blur-2xl bg-white/[0.02] rounded-2xl border border-white/[0.05] shadow-2xl",
+                                isInputSticky && showChat ? "fixed bottom-0 left-0 w-full z-30 px-0 md:px-0" : ""
+                            )}
+                            style={isInputSticky && showChat ? { maxWidth: '100vw', borderRadius: 0, left: 0 } : {}}
+                            animate={isInputSticky && showChat ? { y: 0, scale: 1 } : { y: 0, scale: showChat ? 0.95 : 1 }}
                             transition={{ duration: 0.5, ease: "easeOut" }}
                         >
                             <AnimatePresence>
@@ -1633,6 +1702,7 @@ export function AnimatedAIChat() {
                                 </motion.div>
                             )}
                         </AnimatePresence>
+                        </div>
                     </div>
                 </div>
             </div>

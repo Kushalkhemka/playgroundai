@@ -3,18 +3,7 @@ export interface StreamingMessage {
   content: string;
 }
 
-export type Model = 
-  | 'provider-1/chatgpt-4o-latest'
-  | 'provider-5/gpt-4o'
-  | 'provider-5/gpt-4o-mini'
-  | 'provider-5/o1-preview'
-  | 'provider-5/o1-mini'
-  | 'provider-2/claude-3-5-sonnet-20241022'
-  | 'provider-2/claude-3-5-haiku-20241022'
-  | 'provider-3/llama-3.1-405b-instruct'
-  | 'provider-3/llama-3.1-70b-instruct'
-  | 'provider-4/gemini-1.5-pro-002'
-  | 'provider-4/gemini-1.5-flash-002';
+export type Model = string;
 
 export class A4FApiService {
   private static readonly BASE_URL = 'https://api.a4f.co/v1';
@@ -25,7 +14,7 @@ export class A4FApiService {
     onChunk: (chunk: string) => void,
     onComplete: () => void,
     onError: (error: Error) => void,
-    model: Model = 'provider-5/gpt-4o'
+    model: string = 'provider-5/gpt-4o'
   ): Promise<void> {
     try {
       const response = await fetch(`${this.BASE_URL}/chat/completions`, {
